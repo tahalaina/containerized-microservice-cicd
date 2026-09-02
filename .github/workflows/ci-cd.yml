@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository_owner }}/product-api
@@ -33,6 +36,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
     outputs:
       image: ${{ steps.image.outputs.value }}
     steps:
@@ -50,42 +55,45 @@ jobs:
             type=sha,prefix=
             type=raw,value=latest
       - uses: docker/build-push-action@v6
+        id: build
         with:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      - uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
       - id: image
-        run: echo "value=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: echo "value=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
-  deploy:
-    name: Deploy to Kubernetes
+  deploy-staging:
+    name: Deploy to staging
     needs: publish
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      id-token: write
+    environment: staging
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-kubectl@v4
-      - name: Configure cluster access
-        run: |
-          if [ -z "$KUBE_CONFIG_DATA" ]; then
-            echo "KUBE_CONFIG_DATA is not configured; skipping deployment."
-            exit 0
-          fi
-          mkdir -p "$HOME/.kube"
-          echo "$KUBE_CONFIG_DATA" | base64 --decode > "$HOME/.kube/config"
-          chmod 600 "$HOME/.kube/config"
+      # Add your cloud's OIDC login action here (AWS/GCP/Azure), scoped to staging.
       - name: Deploy and verify rollout
-        if: env.KUBE_CONFIG_DATA != ''
         env:
           IMAGE: ${{ needs.publish.outputs.image }}
         run: |
-          kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/configmap.yaml
-          sed "s|ghcr.io/YOUR_GITHUB_USERNAME/product-api:latest|$IMAGE|" k8s/deployment.yaml | kubectl apply -f -
-          kubectl apply -f k8s/service.yaml
-          kubectl -n product-api rollout status deployment/product-api --timeout=180s
+          cd k8s/overlays/staging
+          kustomize edit set image product-api="$IMAGE"
+          kubectl apply -k .
+          kubectl -n product-api-staging rollout status deployment/product-api --timeout=180s

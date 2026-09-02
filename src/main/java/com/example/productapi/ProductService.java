@@ -1,27 +1,22 @@
 package com.example.productapi;
 
 import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
+import java.util.List;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
 @Service
 public class ProductService {
-    private final AtomicLong sequence = new AtomicLong();
-    private final ConcurrentHashMap<Long, Product> products = new ConcurrentHashMap<>();
-
-    public ProductService() {
-        create(new CreateProductRequest("Starter product", new java.math.BigDecimal("9.99")));
-    }
-
-    public List<Product> findAll() { return products.values().stream().sorted(java.util.Comparator.comparing(Product::id)).toList(); }
-    public Product findById(Long id) { return java.util.Optional.ofNullable(products.get(id)).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "product not found")); }
+    private final ProductRepository products;
+    public ProductService(ProductRepository products) { this.products = products; }
+    @Transactional(readOnly = true)
+    public List<Product> findAll() { return products.findAllByOrderByIdAsc().stream().map(Product::from).toList(); }
+    @Transactional(readOnly = true)
+    public Product findById(Long id) { return products.findById(id).map(Product::from).orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "product not found")); }
+    @Transactional
     public Product create(CreateProductRequest request) {
-        long id = sequence.incrementAndGet();
-        Product product = new Product(id, request.name().trim(), request.price());
-        products.put(id, product);
-        return product;
+        return Product.from(products.save(new ProductEntity(request.name().trim(), request.price())));
     }
 }

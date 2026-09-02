@@ -1,14 +1,16 @@
 # Product API — CI/CD Microservice
 
-A production-style Spring Boot REST API packaged as a Docker container and deployed to Kubernetes. GitHub Actions runs tests, builds the image, publishes it to GitHub Container Registry, and applies the Kubernetes manifests.
+A production-style Spring Boot REST API packaged as a Docker container and deployed to Kubernetes. GitHub Actions runs tests, builds and scans the image, publishes it to GitHub Container Registry, creates build provenance, and deploys the staging overlay.
 
 ## Stack
 
 - Java 17, Spring Boot 3, Maven
 - Spring Web, Validation, Actuator
+- PostgreSQL, Spring Data JPA, Flyway migrations
+- Prometheus metrics and OpenAPI UI (`/swagger-ui/index.html`)
 - Docker (multi-stage build, non-root runtime user)
 - GitHub Actions and GitHub Container Registry (GHCR)
-- Kubernetes Deployment, Service, ConfigMap, health/readiness probes
+- Kubernetes Kustomize overlays, HPA, PDB, NetworkPolicy, hardened pod settings, health probes
 
 ## API
 
@@ -37,7 +39,14 @@ mvn clean verify
 mvn spring-boot:run
 ```
 
-Run in Docker:
+Run PostgreSQL locally, then start the API:
+
+```bash
+docker compose up -d
+mvn spring-boot:run
+```
+
+Run the API image:
 
 ```bash
 docker build -t product-api:local .
@@ -46,14 +55,21 @@ docker run --rm -p 8080:8080 product-api:local
 
 ## Deploy to Kubernetes
 
-First replace `ghcr.io/YOUR_GITHUB_USERNAME/product-api:latest` in `k8s/deployment.yaml`, then:
+Create the database secret in each target namespace (do not commit credentials):
 
 ```bash
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl -n product-api rollout status deployment/product-api
+kubectl -n product-api-staging create secret generic product-api-db \\
+  --from-literal=url='jdbc:postgresql://YOUR_POSTGRES_HOST:5432/products' \\
+  --from-literal=username='products' \\
+  --from-literal=password='REPLACE_ME'
+```
+
+Render or deploy an environment overlay:
+
+```bash
+kubectl kustomize k8s/overlays/staging
+kubectl apply -k k8s/overlays/staging
+kubectl -n product-api-staging rollout status deployment/product-api
 ```
 
 For a private GHCR image, create an `imagePullSecret` and add it to the Deployment.
@@ -62,14 +78,14 @@ For a private GHCR image, create an `imagePullSecret` and add it to the Deployme
 
 The workflow at `.github/workflows/ci-cd.yml` runs on `main` pushes and pull requests:
 
-1. Compiles and runs tests.
-2. Builds and pushes `ghcr.io/<owner>/product-api` on pushes to `main`.
-3. Deploys when a cluster kubeconfig secret is configured.
+1. Compiles, runs unit tests, and runs PostgreSQL Testcontainers integration tests when Docker is available.
+2. Builds, scans, attests, and pushes `ghcr.io/<owner>/product-api` on pushes to `main`.
+3. Deploys staging only when repository variable `DEPLOY_ENABLED` equals `true`.
 
-To enable deployment, create a GitHub Actions secret named `KUBE_CONFIG_DATA` containing a base64-encoded kubeconfig:
+To enable deployment, configure GitHub OIDC trust with your chosen cloud provider, then add that provider's login action in the marked workflow step. Keep the identity scoped to the staging namespace. GitHub's OIDC token replaces long-lived cloud credentials.
 
 ```bash
-base64 -i ~/.kube/config | tr -d '\\n'
+For production, add a protected GitHub `production` environment, a separate production deployment job, and required reviewer approval.
 ```
 
-The deploy job substitutes the built image tag into the deployment manifest and waits for rollout completion. For repository pushes, GHCR authentication uses GitHub's built-in `GITHUB_TOKEN`; ensure Actions has **Read and write** workflow permissions.
+The deploy job injects the immutable image digest into its Kustomize overlay and waits for rollout completion. For repository pushes, GHCR authentication uses GitHub's built-in `GITHUB_TOKEN`; ensure Actions has **Read and write** workflow permissions.
