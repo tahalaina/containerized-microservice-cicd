@@ -89,3 +89,6 @@ For production, add a protected GitHub `production` environment, a separate prod
 ```
 
 The deploy job injects the immutable image digest into its Kustomize overlay and waits for rollout completion. For repository pushes, GHCR authentication uses GitHub's built-in `GITHUB_TOKEN`; ensure Actions has **Read and write** workflow permissions.
+
+Hello Word 
+hello word 2
